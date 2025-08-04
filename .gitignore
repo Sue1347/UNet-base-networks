@@ -1,0 +1,11 @@
+*.pyc
+data/
+data_perfusion/
+__pycache__/
+checkpoints/
+*.pth
+*.jpg
+venv/
+.idea/
+wandb/
+images.dat
