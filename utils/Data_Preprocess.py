@@ -29,6 +29,7 @@ import os
 from scipy.stats import mode
 import time
 import csv
+import json
 from PIL import Image
 
 files_path = "/home/kevin/Downloads/Datasets/SPIDERDataset/data/training/" # images or labels
@@ -65,17 +66,22 @@ for file_name in os.listdir(os.path.join(files_path, "images")):
 
     label_3d = sitk.ReadImage(label_path) # 1_seg_0000.nii.gz
     label_np = sitk.GetArrayFromImage(label_3d)
+
+    label_np[label_np == 6] = 0 # change to one label
+    label_np[label_np > 0] = 1
+
     label_np = label_np * 255
     label_np = label_np.astype(np.uint8) 
 
     print(image_np.shape)
-#     print(label_np.max())
-    
 
+    image_np = np.flip(image_np, axis=0)
+    label_np = np.flip(label_np, axis=0)
+#     print(image_np.shape)
+#     print(label_np.max(), np.unique(label_np))
+#     exit()
+    
     # all_voxels.extend(image_np.flatten())
-    label_np[label_np == 6] = 0 # change to one label
-    label_np[label_np > 0] = 1
-    # print("the label number:", label_np.max())
 
     if image_np.shape[2] > image_np.shape[0]:
          print(f"doing transform for {data_index}")
@@ -84,13 +90,13 @@ for file_name in os.listdir(os.path.join(files_path, "images")):
 
     num_z = image_np.shape[2]
     for z in range(num_z):
-        img = Image.fromarray(image_np[:,:,z])
+        img = Image.fromarray(image_np[:,:,z]) # np.uint8()
         img_resized = img.resize(target_size, resample=Image.BILINEAR)
         lbl = Image.fromarray(label_np[:,:,z])
-        lbl_resized = lbl.resize(target_size, resample=Image.BILINEAR)
+        lbl_resized = lbl.resize(target_size, resample=Image.NEAREST) ### shouldn't use bilinear, it will cause different label values
         
-        img_resized.save(f"{save_data_path}images/{data_index}_t1_{z}.jpg")
-        lbl_resized.save(f"{save_data_path}labels/{data_index}_t1_{z}.gif")
+        img_resized.save(f"{save_data_path}images/{data_index}_t1_{z}.png")
+        lbl_resized.save(f"{save_data_path}labels/{data_index}_t1_{z}.png")
         # print(f"saved one as: {data_index}_t1_{z} .jpg and .gif")
 
     pred_list.append(f"{data_index}_t1") # _{z}.jpg or .gif

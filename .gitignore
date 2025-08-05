@@ -9,3 +9,4 @@ venv/
 .idea/
 wandb/
 images.dat
+*.json
