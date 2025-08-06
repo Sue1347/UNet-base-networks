@@ -14,12 +14,15 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import numpy as np
 import json
-import wandb
 from evaluate import evaluate
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset, PerfusionDataset
 from utils.dice_score import dice_loss
-from torch.utils.data import Subset
+# from torch.utils.data import Subset
+
+from torch.utils.tensorboard import SummaryWriter
+
+writer = SummaryWriter(log_dir='runs/experiment_003')
 
 # dir_img = Path('./data/imgs/')
 # dir_mask = Path('./data/masks/')
@@ -34,23 +37,16 @@ def train_model(
         epochs: int = 5,
         batch_size: int = 1,
         learning_rate: float = 1e-5,
-        val_percent: float = 0.1,
         save_checkpoint: bool = True,
-        img_scale: float = 0.5,
+        img_scale: float = 1.0,
         amp: bool = False,
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
     #################### 1. Create dataset, Split into train / validation
-    try:
-        train_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'train') # dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
-    except (AssertionError, RuntimeError, IndexError):
-        dataset = BasicDataset(dir_img, dir_mask, img_scale)
-
+    train_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'train') # dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
     val_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'val')
-
-    # 2.  partitions
     
     # n_val = int(len(dataset) * val_percent)
     # n_train = len(dataset) - n_val
@@ -62,17 +58,10 @@ def train_model(
     n_train = len(train_set)
     n_val = len(val_set)
 
-    # 3. Create data loaders
+    # 2. Create data loaders
     loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
-
-    # (Initialize logging)
-    experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
-    experiment.config.update(
-        dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
-    )
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -86,15 +75,18 @@ def train_model(
         Mixed Precision: {amp}
     ''')
 
-    # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    # 3. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
+    # optimizer = optim.RMSprop(model.parameters(),
+                            #   lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
+    # optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    # grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
+    val_max = 0
 
-    # 5. Begin training
+    # 4. Begin training
     for epoch in range(1, epochs + 1):
         model = model.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
         model.train()
@@ -111,11 +103,12 @@ def train_model(
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
-                # with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                # print("#### in training: images: size, mean",images.size(),images.mean())
                 masks_pred = model(images)
-                print("#### in training: masks_pred: size, mean",masks_pred.size(),masks_pred.cpu().unique())
-                print("true-masks: ",true_masks.size(),true_masks.cpu().unique())
-                exit()
+                # print("#### in training: masks_pred: size, mean",masks_pred.size(),masks_pred.cpu().unique())
+                # print("true-masks: ",true_masks.size(),true_masks.cpu().unique())
+                # exit()
+
                 if model.n_classes == 1:
                     loss = criterion(masks_pred.squeeze(1), true_masks.float())
                     # print("masks_pred squeeze: size, mean",masks_pred.squeeze(1).size())
@@ -131,74 +124,70 @@ def train_model(
                     # print("loss after",loss)
 
                 optimizer.zero_grad(set_to_none=True)
-                grad_scaler.scale(loss).backward()
-                grad_scaler.unscale_(optimizer)
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+                optimizer.step()
+
 
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
-                # print("epoch_loss",epoch_loss)
-                experiment.log({
-                    'train loss': loss.item(),
-                    'step': global_step,
-                    'epoch': epoch
-                })
+                
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
+
+                # Log to tensorboard
+                writer.add_scalar("Loss/train", loss.item() , global_step)
+                writer.add_scalar("LearningRate/train", optimizer.param_groups[0]['lr'], global_step)
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
-                        histograms = {}
-                        # print("before eval: ",model.named_parameters())
-                        for tag, value in model.named_parameters():
-                            tag = tag.replace('/', '.')
-                            if not (torch.isinf(value) | torch.isnan(value)).any():
-                                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
-                                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(model, val_loader, device, amp)
-                        # print("val_score", val_score)
-                        scheduler.step(val_score)
+                        val_score = evaluate(model, val_loader, device)
+                        # scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
+
+                        if val_score>val_max:
+                            # save the checkpoints
+                            val_max = val_score
+                            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+                            state_dict = model.state_dict()
+                            state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
+                            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_max_Dice.pth'))
+                            logging.info(f'Checkpoint {epoch} saved for it max dice in val set!')
                         try:
-                            experiment.log({
-                                'learning rate': optimizer.param_groups[0]['lr'],
-                                'validation Dice': val_score,
-                                'images': wandb.Image(images[0].cpu()),
-                                'masks': {
-                                    'true': wandb.Image(true_masks[0].float().cpu()),
-                                    'pred': wandb.Image(masks_pred.argmax(dim=1)[0].float().cpu()),
-                                },
-                                'step': global_step,
-                                'epoch': epoch,
-                                **histograms
-                            })
+                            # Log to tensorboard
+                            writer.add_scalar("Dice/val", val_score, global_step)
+
+                            logging.info(f"Epoch {epoch}: Train Loss={loss.item():.4f}, Val Dice={val_score:.4f}")
                         except:
                             pass
 
-        if save_checkpoint:
+        # if save_checkpoint and epoch % 10 == 0:
+        #     Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+        #     state_dict = model.state_dict()
+        #     state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
+        #     torch.save(state_dict, str(dir_checkpoint / 'checkpoint_max_{}.pth'.format(epoch)))
+        #     logging.info(f'Checkpoint {epoch} saved!')
+        if epoch == epochs: 
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
             state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-            logging.info(f'Checkpoint {epoch} saved!')
+            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_final_{}.pth'.format(epoch)))
+            logging.info(f'Final checkpoint {epoch} saved!')
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-3,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=1.0, help='Downscaling factor of the images')
-    parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
+    parser.add_argument('--validation', '-v', dest='val', type=float, default=20.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
@@ -210,7 +199,15 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
 
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    # logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("training.log"),       # <- saved to a file
+            logging.StreamHandler()                    # <- printed to terminal
+        ]
+    )
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
@@ -241,7 +238,7 @@ if __name__ == '__main__':
             learning_rate=args.lr,
             device=device,
             img_scale=args.scale,
-            val_percent=args.val / 100,
+            # val_percent=args.val / 100,
             amp=args.amp
         )
     except torch.cuda.OutOfMemoryError:
@@ -257,6 +254,6 @@ if __name__ == '__main__':
             learning_rate=args.lr,
             device=device,
             img_scale=args.scale,
-            val_percent=args.val / 100,
+            # val_percent=args.val / 100,
             amp=args.amp
         )

@@ -10,3 +10,5 @@ venv/
 wandb/
 images.dat
 *.json
+runs/
+*.log

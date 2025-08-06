@@ -63,14 +63,14 @@ class BasicDataset(Dataset):
 
         self.transform = A.Compose([
             A.RandomCrop(width=256, height=256),
-            A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
-            A.RandomBrightnessContrast(p=0.2),
-            A.ElasticTransform(p=0.3),
-            A.GaussianBlur(p=0.2),
-            A.GaussNoise(p=0.2),
-            A.ColorJitter(p=0.2),
-            A.Normalize(mean=(0.5,), std=(0.5,)),  # for grayscale
+            # A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.05),
+            A.RandomBrightnessContrast(p=0.02),
+            A.ElasticTransform(p=0.03),
+            A.GaussianBlur(p=0.02),
+            A.GaussNoise(p=0.02),
+            A.ColorJitter(p=0.02),
+            # A.Normalize(mean=(0.5,), std=(0.5,)),  # for grayscale ? ######## solution, after normalize, why it become black?
             # ToTensorV2()
         ])
 
@@ -155,7 +155,7 @@ class BasicDataset(Dataset):
             # print("img.size(), mask.size():",img.shape, mask.shape)
             img = np.squeeze(img, axis=0).astype(np.float32)
             mask = mask.astype(np.float32)
-            
+
             augmented = self.transform(image=img, mask=mask)
             img = augmented['image']
             mask = augmented['mask']
