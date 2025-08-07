@@ -19,10 +19,12 @@ from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset, PerfusionDataset
 from utils.dice_score import dice_loss
 # from torch.utils.data import Subset
+from utils.dice_score import multiclass_dice_coeff
+from utils.utils import plot_img_and_mask, show_prediction
 
 from torch.utils.tensorboard import SummaryWriter
 
-writer = SummaryWriter(log_dir='runs/experiment_003')
+
 
 # dir_img = Path('./data/imgs/')
 # dir_mask = Path('./data/masks/')
@@ -33,6 +35,7 @@ dir_checkpoint = Path('./checkpoints/')
 
 def train_model(
         model,
+        writer,
         device,
         epochs: int = 5,
         batch_size: int = 1,
@@ -47,13 +50,6 @@ def train_model(
     #################### 1. Create dataset, Split into train / validation
     train_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'train') # dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
     val_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'val')
-    
-    # n_val = int(len(dataset) * val_percent)
-    # n_train = len(dataset) - n_val
-    # train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
-    
-    # train_set = Subset(dataset, train_indices)
-    # val_set = Subset(dataset, val_indices)
     
     n_train = len(train_set)
     n_val = len(val_set)
@@ -80,9 +76,8 @@ def train_model(
                             #   lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
     # optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    # grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    criterion = nn.CrossEntropyLoss()
+    
     global_step = 0
     val_max = 0
 
@@ -109,25 +104,19 @@ def train_model(
                 # print("true-masks: ",true_masks.size(),true_masks.cpu().unique())
                 # exit()
 
-                if model.n_classes == 1:
-                    loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                    # print("masks_pred squeeze: size, mean",masks_pred.squeeze(1).size())
-                    loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                else:
-                    loss = criterion(masks_pred, true_masks)
-                    # print("loss before",loss)
-                    loss += dice_loss(
-                        F.softmax(masks_pred, dim=1).float(),
-                        F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
-                        multiclass=True
-                    )
-                    # print("loss after",loss)
+                loss = criterion(masks_pred, true_masks)
+                # print("loss before",loss)
+                loss += dice_loss(
+                    F.softmax(masks_pred, dim=1).float(),
+                    F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
+                    multiclass=True
+                )
+                # print("loss after",loss)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 optimizer.step()
-
 
                 pbar.update(images.shape[0])
                 global_step += 1
@@ -139,16 +128,59 @@ def train_model(
                 writer.add_scalar("Loss/train", loss.item() , global_step)
                 writer.add_scalar("LearningRate/train", optimizer.param_groups[0]['lr'], global_step)
 
-                # Evaluation round
-                division_step = (n_train // (5 * batch_size))
+                ################## Evaluation round
+                division_step = (n_train // (4 * batch_size)) # every 25 % of an epoch
                 if division_step > 0:
                     if global_step % division_step == 0:
 
                         val_score = evaluate(model, val_loader, device)
                         # scheduler.step(val_score)
+                        model.eval()
+                        dice_score = 0
+                        num_val_batches = len(val_loader)
+                        count_val = 0
 
-                        logging.info('Validation Dice score: {}'.format(val_score))
+                        with torch.no_grad():
 
+                            for batch in tqdm(val_loader, total=num_val_batches, desc='Validation round', unit='batch', leave=False):
+                                image, mask_true = batch['image'], batch['mask']
+                                image = image.to(device=device, dtype=torch.float32)
+                                mask_true = mask_true.to(device=device, dtype=torch.long)
+
+                                # Run prediction
+                                output = model(image).float()  # <== Force float32 output
+                                probs = F.softmax(output, dim=1)  # optional, if using logits
+
+                                # Check output stats
+                                # print("Output stats:", output.min(), output.max(), output.mean())
+                                # print("Probs stats:", probs.min(), probs.max(), probs.mean())
+
+                                # Argmax to get predicted classes
+                                pred_class = probs.argmax(dim=1)
+
+                                # Convert to one-hot
+                                pred_onehot = F.one_hot(pred_class, model.n_classes).permute(0, 3, 1, 2).float()
+                                true_onehot = F.one_hot(mask_true, model.n_classes).permute(0, 3, 1, 2).float()
+
+                                # Sanity check
+                                # print("pred_onehot mean (ignore bg):", pred_onehot[:, 1:].mean())
+                                # print("true_onehot mean (ignore bg):", true_onehot[:, 1:].mean())
+
+                                # Compute Dice score (ignoring background class 0)
+                                dice = multiclass_dice_coeff(pred_onehot[:, 1:], true_onehot[:, 1:], reduce_batch_first=False)
+
+                                dice_score += dice
+                                count_val += 1
+
+                                # show the prediction
+                                if epoch > 5 and count_val % 50 == 0:
+                                    show_prediction(image, pred_class, mask_true)
+
+                        model.train()
+                        val_score = dice_score / max(num_val_batches, 1)
+                        logging.info(f'Validation Dice score: {val_score:.4f}')
+
+                        # Save the best model based on validation score
                         if val_score>val_max:
                             # save the checkpoints
                             val_max = val_score
@@ -157,20 +189,13 @@ def train_model(
                             state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
                             torch.save(state_dict, str(dir_checkpoint / 'checkpoint_max_Dice.pth'))
                             logging.info(f'Checkpoint {epoch} saved for it max dice in val set!')
-                        try:
-                            # Log to tensorboard
-                            writer.add_scalar("Dice/val", val_score, global_step)
+                        
+                        writer.add_scalar("Dice/val", val_score, global_step)
 
-                            logging.info(f"Epoch {epoch}: Train Loss={loss.item():.4f}, Val Dice={val_score:.4f}")
-                        except:
-                            pass
+                        logging.info(f"Epoch {epoch}: Train Loss={loss.item():.4f}, Val Dice={val_score:.4f}")
 
-        # if save_checkpoint and epoch % 10 == 0:
-        #     Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-        #     state_dict = model.state_dict()
-        #     state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
-        #     torch.save(state_dict, str(dir_checkpoint / 'checkpoint_max_{}.pth'.format(epoch)))
-        #     logging.info(f'Checkpoint {epoch} saved!')
+                        
+
         if epoch == epochs: 
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
@@ -182,6 +207,7 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--experiment', '-exp', type=str, default='', help='The index of the experiments, like 001')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-3,
                         help='Learning rate', dest='lr')
@@ -211,6 +237,8 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
+    writer = SummaryWriter(log_dir=f'runs/experiment_{args.experiment}')
+
     ################ Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_channels=1 for grayscale images
@@ -233,6 +261,7 @@ if __name__ == '__main__':
     try:
         train_model(
             model=model,
+            writer = writer,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.lr,
@@ -249,6 +278,7 @@ if __name__ == '__main__':
         model.use_checkpointing()
         train_model(
             model=model,
+            writer = writer,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.lr,

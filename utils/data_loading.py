@@ -62,7 +62,7 @@ class BasicDataset(Dataset):
         self.split = split
 
         self.transform = A.Compose([
-            A.RandomCrop(width=256, height=256),
+            # A.RandomCrop(width=256, height=256), # no need to random crop in the spider dataset
             # A.HorizontalFlip(p=0.5),
             A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.05),
             A.RandomBrightnessContrast(p=0.02),
@@ -151,15 +151,15 @@ class BasicDataset(Dataset):
         mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
 
         # Apply transformations (augmentation + preprocessing)
-        if self.split == 'train':
-            # print("img.size(), mask.size():",img.shape, mask.shape)
-            img = np.squeeze(img, axis=0).astype(np.float32)
-            mask = mask.astype(np.float32)
+        # if self.split == 'train':
+        #     # print("img.size(), mask.size():",img.shape, mask.shape)
+        #     img = np.squeeze(img, axis=0).astype(np.float32)
+        #     mask = mask.astype(np.float32)
 
-            augmented = self.transform(image=img, mask=mask)
-            img = augmented['image']
-            mask = augmented['mask']
-            img = np.expand_dims(img, axis=0)
+        #     augmented = self.transform(image=img, mask=mask)
+        #     img = augmented['image']
+        #     mask = augmented['mask']
+        #     img = np.expand_dims(img, axis=0)
             # print("img.size(), mask.size():",img.shape, mask.shape)
 
         return {

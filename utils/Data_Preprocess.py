@@ -77,6 +77,7 @@ for file_name in os.listdir(os.path.join(files_path, "images")):
 
     image_np = np.flip(image_np, axis=0)
     label_np = np.flip(label_np, axis=0)
+    print(np.mean(label_np)) # 8?
 #     print(image_np.shape)
 #     print(label_np.max(), np.unique(label_np))
 #     exit()
@@ -90,14 +91,16 @@ for file_name in os.listdir(os.path.join(files_path, "images")):
 
     num_z = image_np.shape[2]
     for z in range(num_z):
-        img = Image.fromarray(image_np[:,:,z]) # np.uint8()
-        img_resized = img.resize(target_size, resample=Image.BILINEAR)
-        lbl = Image.fromarray(label_np[:,:,z])
-        lbl_resized = lbl.resize(target_size, resample=Image.NEAREST) ### shouldn't use bilinear, it will cause different label values
         
-        img_resized.save(f"{save_data_path}images/{data_index}_t1_{z}.png")
-        lbl_resized.save(f"{save_data_path}labels/{data_index}_t1_{z}.png")
-        # print(f"saved one as: {data_index}_t1_{z} .jpg and .gif")
+        if label_np[:,:,z].mean() > 5:
+            img = Image.fromarray(image_np[:,:,z]) # np.uint8()
+            img_resized = img.resize(target_size, resample=Image.BILINEAR)
+            lbl = Image.fromarray(label_np[:,:,z])
+            lbl_resized = lbl.resize(target_size, resample=Image.NEAREST) ### shouldn't use bilinear, it will cause different label values
+            
+            img_resized.save(f"{save_data_path}images/{data_index}_t1_{z}.png")
+            lbl_resized.save(f"{save_data_path}labels/{data_index}_t1_{z}.png")
+            # print(f"saved one as: {data_index}_t1_{z} .jpg and .gif")
 
     pred_list.append(f"{data_index}_t1") # _{z}.jpg or .gif
     record_list.append(f"{data_index},{image_np.shape[0]},{image_np.shape[1]},{image_np.shape[2]},{spacing[0]},{spacing[1]},{spacing[2]},{np.min(image_np)},{np.max(image_np)},{np.mean(image_np)},{np.median(image_np)},{np.percentile(image_np, 0.5)}{np.percentile(image_np, 99.5)}")
