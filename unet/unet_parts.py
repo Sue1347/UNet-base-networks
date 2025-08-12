@@ -75,3 +75,14 @@ class OutConv(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
+def match_cat(x, y):
+    """Match the size of x to y by concatenating them."""
+    diffY = y.size()[2] - x.size()[2]
+    diffX = y.size()[3] - x.size()[3]
+
+    x = F.pad(x, [diffX // 2, diffX - diffX // 2,
+                    diffY // 2, diffY - diffY // 2])
+    x = torch.cat([y, x], dim=1)
+
+    return x

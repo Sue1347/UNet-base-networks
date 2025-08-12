@@ -9,28 +9,48 @@ from PIL import Image
 from torchvision import transforms
 
 from utils.data_loading import BasicDataset
-from unet import UNet
-from utils.utils import plot_img_and_mask
+from unet.unet_model import UNet_7, UNet
+from utils.utils import plot_img_and_mask, show_prediction
+import matplotlib.pyplot as plt
+
+"""
+python predict.py -m checkpoints/checkpoint_final_50_007.pth -i data_perfusion/images/3_t1_5.png -o output_3_5.jpg
+"""
 
 def predict_img(net,
                 full_img,
                 device,
-                scale_factor=1,
-                out_threshold=0.5):
+                scale_factor=1):
     net.eval()
     img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False))
     img = img.unsqueeze(0)
+    
     img = img.to(device=device, dtype=torch.float32)
+    # print(f'img: {torch.unique(img)}')
+
 
     with torch.no_grad():
-        output = net(img).cpu()
-        output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear')
-        if net.n_classes > 1:
-            mask = output.argmax(dim=1)
-        else:
-            mask = torch.sigmoid(output) > out_threshold
+        output = net(img).float().cpu()
+        
+        # print(f'Output shape: {output.shape}, values: {torch.unique(output)}')
+        
+        probs = F.softmax(output, dim=1)  # optional, if using logits
+        
+        mask = probs.argmax(dim=1)
+        # print(f'Mask shape: {mask.shape}, Mask values: {torch.unique(mask)}')
 
-    return mask[0].long().squeeze().numpy()
+        # mask = F.interpolate(mask, (full_img.size[1], full_img.size[0]), mode='bilinear')
+        
+        # plt.figure(figsize=(12, 4))
+        # plt.subplot(1, 3, 1)
+        # plt.imshow(img[0][0].cpu(), cmap='gray')
+        # plt.title("Input")
+        
+        # plt.subplot(1, 3, 2)
+        # plt.imshow(mask[0].cpu(), cmap='jet')
+        # plt.title("Prediction")
+        # plt.show()
+    return mask[0].cpu().numpy()
 
 
 def get_args():
@@ -42,9 +62,8 @@ def get_args():
     parser.add_argument('--viz', '-v', action='store_true',
                         help='Visualize the images as they are processed')
     parser.add_argument('--no-save', '-n', action='store_true', help='Do not save the output masks')
-    parser.add_argument('--mask-threshold', '-t', type=float, default=0.5,
-                        help='Minimum probability value to consider a mask pixel white')
-    parser.add_argument('--scale', '-s', type=float, default=0.5,
+    
+    parser.add_argument('--scale', '-s', type=float, default=1.0,
                         help='Scale factor for the input images')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
@@ -59,23 +78,6 @@ def get_output_filenames(args):
     return args.output or list(map(_generate_name, args.input))
 
 
-def mask_to_image(mask: np.ndarray, mask_values):
-    if isinstance(mask_values[0], list):
-        out = np.zeros((mask.shape[-2], mask.shape[-1], len(mask_values[0])), dtype=np.uint8)
-    elif mask_values == [0, 1]:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=bool)
-    else:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=np.uint8)
-
-    if mask.ndim == 3:
-        mask = np.argmax(mask, axis=0)
-
-    for i, v in enumerate(mask_values):
-        out[mask == i] = v
-
-    return Image.fromarray(out)
-
-
 if __name__ == '__main__':
     args = get_args()
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -83,7 +85,7 @@ if __name__ == '__main__':
     in_files = args.input
     out_files = get_output_filenames(args)
 
-    net = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet(n_channels=1, n_classes=args.classes)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Loading model {args.model}')
@@ -103,15 +105,11 @@ if __name__ == '__main__':
         mask = predict_img(net=net,
                            full_img=img,
                            scale_factor=args.scale,
-                           out_threshold=args.mask_threshold,
                            device=device)
 
         if not args.no_save:
             out_filename = out_files[i]
-            result = mask_to_image(mask, mask_values)
+            result = Image.fromarray(mask.astype(np.uint8) * 255)  # Convert mask to binary image # for binary masks
+            result = result.convert('L')  # Convert to grayscale
             result.save(out_filename)
             logging.info(f'Mask saved to {out_filename}')
-
-        if args.viz:
-            logging.info(f'Visualizing results for image {filename}, close to continue...')
-            plot_img_and_mask(img, mask)

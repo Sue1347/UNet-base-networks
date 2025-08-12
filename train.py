@@ -14,8 +14,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import numpy as np
 import json
-from evaluate import evaluate
-from unet import UNet
+from unet.unet_model import UNet, UNet_7
 from utils.data_loading import BasicDataset, CarvanaDataset, PerfusionDataset
 from utils.dice_score import dice_loss
 # from torch.utils.data import Subset
@@ -42,13 +41,14 @@ def train_model(
         learning_rate: float = 1e-5,
         save_checkpoint: bool = True,
         img_scale: float = 1.0,
-        amp: bool = False,
+        # amp: bool = False,
         weight_decay: float = 1e-8,
-        momentum: float = 0.999,
+        p_aug: float = 0.1,
         gradient_clipping: float = 1.0,
+        nom: str = ''
 ):
     #################### 1. Create dataset, Split into train / validation
-    train_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'train') # dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+    train_set = PerfusionDataset(dir_img, dir_mask, img_scale, p_aug, split = 'train') # dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
     val_set = PerfusionDataset(dir_img, dir_mask, img_scale, split = 'val')
     
     n_train = len(train_set)
@@ -60,6 +60,7 @@ def train_model(
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     logging.info(f'''Starting training:
+        Experiment:      {nom}
         Epochs:          {epochs}
         Batch size:      {batch_size}
         Learning rate:   {learning_rate}
@@ -68,10 +69,9 @@ def train_model(
         Checkpoints:     {save_checkpoint}
         Device:          {device.type}
         Images scaling:  {img_scale}
-        Mixed Precision: {amp}
     ''')
 
-    # 3. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
+    # 3. Set up the optimizer, the loss
     # optimizer = optim.RMSprop(model.parameters(),
                             #   lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
     # optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -98,11 +98,7 @@ def train_model(
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
-                # print("#### in training: images: size, mean",images.size(),images.mean())
                 masks_pred = model(images)
-                # print("#### in training: masks_pred: size, mean",masks_pred.size(),masks_pred.cpu().unique())
-                # print("true-masks: ",true_masks.size(),true_masks.cpu().unique())
-                # exit()
 
                 loss = criterion(masks_pred, true_masks)
                 # print("loss before",loss)
@@ -129,11 +125,11 @@ def train_model(
                 writer.add_scalar("LearningRate/train", optimizer.param_groups[0]['lr'], global_step)
 
                 ################## Evaluation round
-                division_step = (n_train // (4 * batch_size)) # every 25 % of an epoch
+                division_step = (n_train // (1 * batch_size)) # every 25 % of an epoch or 1
                 if division_step > 0:
                     if global_step % division_step == 0:
 
-                        val_score = evaluate(model, val_loader, device)
+                        # val_score = evaluate(model, val_loader, device)
                         # scheduler.step(val_score)
                         model.eval()
                         dice_score = 0
@@ -173,8 +169,8 @@ def train_model(
                                 count_val += 1
 
                                 # show the prediction
-                                if epoch > 5 and count_val % 50 == 0:
-                                    show_prediction(image, pred_class, mask_true)
+                                # if epoch > 5 and count_val % 50 == 0:
+                                #     show_prediction(image, pred_class, mask_true)
 
                         model.train()
                         val_score = dice_score / max(num_val_batches, 1)
@@ -187,7 +183,7 @@ def train_model(
                             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
                             state_dict = model.state_dict()
                             state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
-                            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_max_Dice.pth'))
+                            torch.save(state_dict, str(dir_checkpoint / f'checkpoint_max_Dice.pth'))
                             logging.info(f'Checkpoint {epoch} saved for it max dice in val set!')
                         
                         writer.add_scalar("Dice/val", val_score, global_step)
@@ -200,7 +196,7 @@ def train_model(
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
             state_dict['mask_values'] = train_set.mask_values #dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_final_{}.pth'.format(epoch)))
+            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_final_{}.pth'.format(nom)))
             logging.info(f'Final checkpoint {epoch} saved!')
 
 
@@ -213,9 +209,9 @@ def get_args():
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=1.0, help='Downscaling factor of the images')
+    parser.add_argument('--p_aug', '-p', type=float, default=0.1, help='The probablity of Augmentation')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=20.0,
                         help='Percent of the data that is used as validation (0-100)')
-    parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
 
@@ -243,7 +239,8 @@ if __name__ == '__main__':
     # n_channels=3 for RGB images
     # n_channels=1 for grayscale images
     # n_classes is the number of probabilities you want to get per pixel, if only one label, then n_classes=2
-    model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet_7(n_channels=1, n_classes=args.classes)
+    # model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
@@ -258,32 +255,16 @@ if __name__ == '__main__':
         logging.info(f'Model loaded from {args.load}')
 
     model.to(device=device)
-    try:
-        train_model(
-            model=model,
-            writer = writer,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            learning_rate=args.lr,
-            device=device,
-            img_scale=args.scale,
-            # val_percent=args.val / 100,
-            amp=args.amp
-        )
-    except torch.cuda.OutOfMemoryError:
-        logging.error('Detected OutOfMemoryError! '
-                      'Enabling checkpointing to reduce memory usage, but this slows down training. '
-                      'Consider enabling AMP (--amp) for fast and memory efficient training')
-        torch.cuda.empty_cache()
-        model.use_checkpointing()
-        train_model(
-            model=model,
-            writer = writer,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            learning_rate=args.lr,
-            device=device,
-            img_scale=args.scale,
-            # val_percent=args.val / 100,
-            amp=args.amp
-        )
+
+    train_model(
+        model=model,
+        writer = writer,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+        device=device,
+        img_scale=args.scale,
+        p_aug= args.p_aug,
+        nom=args.experiment
+    )
+    

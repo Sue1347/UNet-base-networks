@@ -53,23 +53,24 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
 
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '', split: str = 'val'): 
+    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, p_aug: float = 0.1, mask_suffix: str = '', split: str = 'val'): 
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
         self.scale = scale
         self.mask_suffix = mask_suffix
         self.split = split
+        self.p = p_aug
 
         self.transform = A.Compose([
             # A.RandomCrop(width=256, height=256), # no need to random crop in the spider dataset
             # A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.05),
-            A.RandomBrightnessContrast(p=0.02),
-            A.ElasticTransform(p=0.03),
-            A.GaussianBlur(p=0.02),
-            A.GaussNoise(p=0.02),
-            A.ColorJitter(p=0.02),
+            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=self.p),
+            A.RandomBrightnessContrast(p=self.p),
+            A.ElasticTransform(p=self.p),
+            A.GaussianBlur(p=self.p),
+            A.GaussNoise(p=self.p),
+            A.ColorJitter(p=self.p),
             # A.Normalize(mean=(0.5,), std=(0.5,)),  # for grayscale ? ######## solution, after normalize, why it become black?
             # ToTensorV2()
         ])
@@ -151,15 +152,15 @@ class BasicDataset(Dataset):
         mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
 
         # Apply transformations (augmentation + preprocessing)
-        # if self.split == 'train':
-        #     # print("img.size(), mask.size():",img.shape, mask.shape)
-        #     img = np.squeeze(img, axis=0).astype(np.float32)
-        #     mask = mask.astype(np.float32)
+        if self.split == 'train':
+            # print("img.size(), mask.size():",img.shape, mask.shape)
+            img = np.squeeze(img, axis=0).astype(np.float32)
+            mask = mask.astype(np.float32)
 
-        #     augmented = self.transform(image=img, mask=mask)
-        #     img = augmented['image']
-        #     mask = augmented['mask']
-        #     img = np.expand_dims(img, axis=0)
+            augmented = self.transform(image=img, mask=mask)
+            img = augmented['image']
+            mask = augmented['mask']
+            img = np.expand_dims(img, axis=0)
             # print("img.size(), mask.size():",img.shape, mask.shape)
 
         return {
@@ -173,5 +174,5 @@ class CarvanaDataset(BasicDataset):
         super().__init__(images_dir, mask_dir, scale, mask_suffix ='_mask')
 
 class PerfusionDataset(BasicDataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale=1, mask_suffix = '', split = 'val'):
-        super().__init__(images_dir, mask_dir, scale, mask_suffix, split)
+    def __init__(self, images_dir: str, mask_dir: str, scale=1, p_aug = 0.1, mask_suffix = '', split = 'val'):
+        super().__init__(images_dir, mask_dir, scale, p_aug, mask_suffix, split)
